@@ -1,0 +1,199 @@
+{
+  "slug": "tlyyxjz/casbin-config-doctor",
+  "version": "0.1.0",
+  "description": "Diagnose, generate and fix Casbin model.conf & policy.csv configurations. Explains why enforce() returns false, detects duplicate rules, role cycles and matcher-order bugs.",
+  "auth": {
+    "type": "none"
+  },
+  "requires": {
+    "network": [],
+    "subprocess": false,
+    "filesystem_writes": []
+  },
+  "commands": [
+    {
+      "name": "validate_model",
+      "description": "Validate model.conf syntax and required sections (request_definition, policy_definition, role_definition, policy_effect, matchers).",
+      "side_effects": "none",
+      "input": {
+        "type": "object",
+        "properties": {
+          "model_conf": {
+            "type": "string",
+            "description": "Full model.conf content"
+          }
+        },
+        "required": [
+          "model_conf"
+        ]
+      },
+      "title": "Validate model.conf",
+      "id": "validate_model"
+    },
+    {
+      "name": "check_policy",
+      "description": "Check one policy line against a model: correct number of tokens per policy_definition.",
+      "side_effects": "none",
+      "input": {
+        "type": "object",
+        "properties": {
+          "model_conf": {
+            "type": "string"
+          },
+          "policy_line": {
+            "type": "string",
+            "description": "e.g. 'p, alice, data1, read'"
+          }
+        },
+        "required": [
+          "model_conf",
+          "policy_line"
+        ]
+      },
+      "title": "Check one policy line",
+      "id": "check_policy"
+    },
+    {
+      "name": "detect_duplicates",
+      "description": "Detect duplicate policy rules in policy.csv.",
+      "side_effects": "none",
+      "input": {
+        "type": "object",
+        "properties": {
+          "policy_csv": {
+            "type": "string",
+            "description": "Full policy.csv content"
+          }
+        },
+        "required": [
+          "policy_csv"
+        ]
+      },
+      "title": "Detect duplicate policy rules",
+      "id": "detect_duplicates"
+    },
+    {
+      "name": "detect_role_cycle",
+      "description": "Detect inheritance cycles among g (role) rules.",
+      "side_effects": "none",
+      "input": {
+        "type": "object",
+        "properties": {
+          "policy_csv": {
+            "type": "string"
+          },
+          "role_rule": {
+            "type": "string",
+            "description": "g rule prefix, default 'g'"
+          }
+        },
+        "required": [
+          "policy_csv"
+        ]
+      },
+      "title": "Detect role inheritance cycles",
+      "id": "detect_role_cycle"
+    },
+    {
+      "name": "explain_deny",
+      "description": "Explain step by step why an enforce(sub, obj, act) request is denied: which policies were considered, which matcher clauses failed.",
+      "side_effects": "none",
+      "input": {
+        "type": "object",
+        "properties": {
+          "model_conf": {
+            "type": "string"
+          },
+          "policy_csv": {
+            "type": "string"
+          },
+          "sub": {
+            "type": "string"
+          },
+          "obj": {
+            "type": "string"
+          },
+          "act": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_conf",
+          "policy_csv",
+          "sub",
+          "obj",
+          "act"
+        ]
+      },
+      "title": "Explain why a request is denied",
+      "id": "explain_deny"
+    },
+    {
+      "name": "diagnose",
+      "description": "Run the full check-up: model syntax, policy token counts, duplicates, role cycles, unreachable rules, and return an issue list with severity.",
+      "side_effects": "none",
+      "input": {
+        "type": "object",
+        "properties": {
+          "model_conf": {
+            "type": "string"
+          },
+          "policy_csv": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_conf",
+          "policy_csv"
+        ]
+      },
+      "title": "Full configuration check-up",
+      "id": "diagnose"
+    },
+    {
+      "name": "generate",
+      "description": "Generate model.conf + policy.csv from a plain-language requirement description (supports common RBAC / restful / ABAC patterns).",
+      "side_effects": "none",
+      "input": {
+        "type": "object",
+        "properties": {
+          "requirement": {
+            "type": "string",
+            "description": "Plain-language description, e.g. 'RBAC where admins manage everything and viewers only read reports'"
+          }
+        },
+        "required": [
+          "requirement"
+        ]
+      },
+      "title": "Generate config from plain language",
+      "id": "generate"
+    },
+    {
+      "name": "compare",
+      "description": "Diff two policy.csv files: added / removed / unchanged rules.",
+      "side_effects": "none",
+      "input": {
+        "type": "object",
+        "properties": {
+          "policy_a": {
+            "type": "string"
+          },
+          "policy_b": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_a",
+          "policy_b"
+        ]
+      },
+      "title": "Diff two policy files",
+      "id": "compare"
+    }
+  ],
+  "license_required": false,
+  "manifest_version": 2,
+  "publisher_pubkey": "010f889013ec2285ceba7a5052d1433df1712525b910817e42be031e0f7a8b66",
+  "id": "tlyyxjz/casbin-config-doctor"
+}
