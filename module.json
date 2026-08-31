@@ -1,6 +1,6 @@
 {
   "slug": "tlyyxjz/casbin-config-doctor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Diagnose, generate and fix Casbin model.conf & policy.csv configurations. Explains why enforce() returns false, detects duplicate rules, role cycles and matcher-order bugs.",
   "auth": {
     "type": "none"
