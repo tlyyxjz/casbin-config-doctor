@@ -209,62 +209,82 @@ def detect_role_cycle(inputs, context=None):
 
 
 def explain_deny(inputs, context=None):
+    """解释 enforce 为什么返回 false。支持 ACL/RBAC 和 domains 多租户模型。
+
+    原理：按 request_definition / policy_definition 的字段定义对齐请求值与
+    策略值，逐字段比对（含角色展开和通配符），给出归因。
+    """
     sections, _ = parse_model(inputs["model_conf"])
     rules = parse_policy(inputs["policy_csv"])
     sub, obj, act = inputs["sub"], inputs["obj"], inputs["act"]
+    dom = inputs.get("dom") or inputs.get("domain")
 
+    req_vars = list(_def_vars(sections, "request_definition"))
     pol_vars = list(_def_vars(sections, "policy_definition"))
-    if len(pol_vars) < 3:
-        return {"allowed": None, "reason": "cannot explain: policy_definition needs at least sub, obj, act"}
 
-    subject_var, object_var, action_var = pol_vars[0], pol_vars[1], pol_vars[2]
+    # 角色继承参数：g = _,_ 是 2 元；domains 模型 g = _,_,_ 是 3 元
+    g_params = 2
+    for expr in (sections.get("role_definition") or {}).values():
+        n = len([t for t in expr.split(",") if t.strip()])
+        g_params = max(g_params, n)
 
-    # role expansion from g rules (single domain)
+    # 角色展开（domains 模型继承按域隔离：g, sub, role, dom）
     roles_of = {sub}
     changed = True
     while changed:
         changed = False
         for r in rules:
-            if r["rule_type"] == "g" and len(r["tokens"]) >= 3 \
-                    and r["tokens"][1] in roles_of and r["tokens"][2] not in roles_of:
-                roles_of.add(r["tokens"][2])
-                changed = True
+            if r["rule_type"] == "g" and len(r["tokens"]) >= 3:
+                child, parent = r["tokens"][1], r["tokens"][2]
+                rdom = r["tokens"][3] if len(r["tokens"]) >= 4 else None
+                if child in roles_of:
+                    if rdom and dom and rdom != dom:
+                        continue
+                    if parent not in roles_of:
+                        roles_of.add(parent)
+                        changed = True
 
+    # 请求值向量（按 request_definition 字段顺序）
+    if len(req_vars) == 4 and dom:
+        rvals = [sub, dom, obj, act]
+    else:
+        rvals = [sub, obj, act]
+
+    def field_match(pv, rv):
+        return pv == rv or pv == "*"
+
+    sub_pos = 0 if pol_vars and "sub" in pol_vars[0].lower() else None
+    matcher = next(iter((sections.get("matchers") or {}).values()), "")
     candidates, failures = [], []
     matched_any = False
     for r in rules:
-        if r["rule_type"] != "p" or len(r["tokens"]) < 4:
+        if r["rule_type"] != "p":
             continue
-        p_sub, p_obj, p_act = r["tokens"][1], r["tokens"][2], r["tokens"][3]
-        ok_sub = p_sub == sub or p_sub in roles_of or p_sub == "*"
-        ok_obj = p_obj == obj or p_obj == "*"
-        ok_act = p_act == act or p_act == "*"
-        if ok_sub and ok_obj and ok_act:
+        pvals = r["tokens"][1:]
+        if len(pvals) != len(rvals):
+            continue  # token 数不匹配的规则由 diagnose 负责报错
+        checks = []
+        for idx, (pv, rv) in enumerate(zip(pvals, rvals)):
+            ok = pv == rv or pv == "*"
+            if not ok and idx == 0 and pv in roles_of:
+                ok = True  # subject 位置走角色展开
+            checks.append(ok)
+        if all(checks):
             matched_any = True
             candidates.append({"line": r["line"], "rule": ",".join(r["tokens"])})
         else:
             why = []
-            if not ok_sub:
-                why.append("subject mismatch: policy has '%s', request is '%s' (roles: %s)"
-                           % (p_sub, sub, sorted(roles_of - {sub})))
-            if not ok_obj:
-                why.append("object mismatch: policy has '%s', request is '%s'" % (p_obj, obj))
-            if not ok_act:
-                why.append("action mismatch: policy has '%s', request is '%s'" % (p_act, act))
-            # only report near-misses (2 of 3 fields matched) to keep output useful
-            if sum(1 for ok in (ok_sub, ok_obj, ok_act) if ok) >= 2:
-                failures.append({"line": r["line"], "rule": ",".join(r["tokens"]),
-                                 "why_not": why})
+            for idx, (pv, rv) in enumerate(zip(pvals, rvals)):
+                if not (pv == rv or pv == "*"):
+                    why.append(f"{pol_vars[idx] if idx < len(pol_vars) else idx} mismatch: policy has '{pv}', request is '{rv}'")
+            if sum(checks) >= len(pvals) - 1:
+                failures.append({"line": r["line"], "rule": ",".join(r["tokens"]), "why_not": why})
 
-    matcher = next(iter((sections.get("matchers") or {}).values()), "")
-    allow_style = "hasAllow" if "hasAllow" in sections.get("policy_effect", {}).get(
-        next(iter(sections.get("policy_effect", {})), ""), "") or "!deny" in str(
-        sections.get("policy_effect", {})) else "some"
-
+        matcher = next(iter((sections.get("matchers") or {}).values()), "")
     return {
-        "request": {"sub": sub, "obj": obj, "act": act},
+        "request": dict(zip(req_vars, rvals)) if len(req_vars) == len(rvals) else {"sub": sub, "obj": obj, "act": act},
         "roles_considered": sorted(roles_of),
-        "allowed": matched_any,
+        "allowed": bool(candidates),
         "matching_rules": candidates,
         "near_misses": failures[:10],
         "matcher": matcher,

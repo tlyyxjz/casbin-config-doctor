@@ -128,7 +128,7 @@ g, alice, admin, domain1
 def test_s4_domains_explain():
     """多租户：alice 在 domain1 有 admin 角色 → data1 read 应允许"""
     out = handler.explain_deny({"model_conf": SC4_MODEL, "policy_csv": SC4_POLICY,
-                                "sub": "alice", "obj": "data1", "act": "read"})
+                                "sub": "alice", "dom": "domain1", "obj": "data1", "act": "read"})
     # 当前 Doctor 未处理 domains 三元 g 规则 —— 预期这里是已知缺口
     print(f"\n[domains] allowed={out['allowed']} roles={out['roles_considered']}")
     # v0.2 目标：允许且 roles_considered 含 admin
