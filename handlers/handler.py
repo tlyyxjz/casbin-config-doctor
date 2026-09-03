@@ -90,12 +90,20 @@ def validate_model(inputs, context=None):
 
 
 def _def_vars(sections, section):
-    out = set()
+    """Return the variable names of a definition section, in declaration order.
+
+    Order matters: callers zip this against request/policy value vectors, so a
+    set (arbitrary iteration order) would silently mislabel every field.
+    """
+    out = []
     for expr in (sections.get(section) or {}).values():
         for tok in expr.split(","):
             tok = tok.strip()
-            if tok:
-                out.add(tok.split("=")[-1].strip())
+            if not tok:
+                continue
+            name = tok.split("=")[-1].strip()
+            if name and name not in out:
+                out.append(name)
     return out
 
 
@@ -275,8 +283,12 @@ def explain_deny(inputs, context=None):
         else:
             why = []
             for idx, (pv, rv) in enumerate(zip(pvals, rvals)):
-                if not (pv == rv or pv == "*"):
-                    why.append(f"{pol_vars[idx] if idx < len(pol_vars) else idx} mismatch: policy has '{pv}', request is '{rv}'")
+                if pv == rv or pv == "*":
+                    continue
+                # subject 位置若通过角色继承匹配上，就不是失败原因，不能报
+                if idx == 0 and pv in roles_of:
+                    continue
+                why.append(f"{pol_vars[idx] if idx < len(pol_vars) else idx} mismatch: policy has '{pv}', request is '{rv}'")
             if sum(checks) >= len(pvals) - 1:
                 failures.append({"line": r["line"], "rule": ",".join(r["tokens"]), "why_not": why})
 

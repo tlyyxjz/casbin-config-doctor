@@ -123,3 +123,78 @@ def test_compare():
     assert out["added"] == ["p,u3,d1,write"]
     assert out["removed"] == ["p,u2,d1,read"]
     assert out["unchanged"] == ["p,u1,d1,read"]
+
+
+DOMAIN_MODEL = """[request_definition]
+r = sub, dom, obj, act
+
+[policy_definition]
+p = sub, dom, obj, act
+
+[role_definition]
+g = _, _, _
+
+[policy_effect]
+e = some(where (p.eft == allow))
+
+[matchers]
+m = g(r.sub, p.sub, r.dom) && r.dom == p.dom && r.obj == p.obj && r.act == p.act
+"""
+
+DOMAIN_POLICY = """p, admin, domain1, data1, read
+g, alice, admin, domain1
+"""
+
+
+def test_explain_deny_labels_request_fields_in_model_order():
+    """Regression: _def_vars returned a set, so zip(req_vars, rvals) mislabelled
+    every field (e.g. sub/obj/act rotated). Field names must follow the order
+    declared in request_definition."""
+    out = handler.explain_deny({
+        "model_conf": GOOD_MODEL,
+        "policy_csv": "p, alice, data1, read\n",
+        "sub": "alice", "obj": "data2", "act": "read",
+    })
+    assert out["request"] == {"sub": "alice", "obj": "data2", "act": "read"}, out["request"]
+
+
+def test_explain_deny_near_miss_names_the_failing_field():
+    """The near-miss reason must name the field that actually failed."""
+    out = handler.explain_deny({
+        "model_conf": GOOD_MODEL,
+        "policy_csv": "p, alice, data1, read\n",
+        "sub": "alice", "obj": "data2", "act": "read",
+    })
+    reasons = " ".join(r for m in out["near_misses"] for r in m["why_not"])
+    assert "obj mismatch" in reasons, out["near_misses"]
+    assert "policy has 'data1'" in reasons, out["near_misses"]
+
+
+def test_explain_deny_domains_labels_dom_field():
+    """Multi-tenant models declare r = sub, dom, obj, act; dom must be labelled
+    as dom, not rotated into another position."""
+    out = handler.explain_deny({
+        "model_conf": DOMAIN_MODEL,
+        "policy_csv": DOMAIN_POLICY,
+        "sub": "alice", "obj": "data2", "act": "read", "dom": "domain1",
+    })
+    assert out["request"] == {
+        "sub": "alice", "dom": "domain1", "obj": "data2", "act": "read",
+    }, out["request"]
+    reasons = " ".join(r for m in out["near_misses"] for r in m["why_not"])
+    assert "obj mismatch" in reasons, out["near_misses"]
+
+
+def test_explain_deny_does_not_blame_role_inherited_subject():
+    """Regression: when the request subject reaches the policy subject through a
+    g (role) rule, the subject position DID match. Reporting 'sub mismatch'
+    there is a false accusation that hides the real failing field."""
+    out = handler.explain_deny({
+        "model_conf": GOOD_MODEL,
+        "policy_csv": "p, admin, data2, write\ng, alice, admin\n",
+        "sub": "alice", "obj": "data2", "act": "read",
+    })
+    reasons = " ".join(r for m in out["near_misses"] for r in m["why_not"])
+    assert "sub mismatch" not in reasons, out["near_misses"]
+    assert "act mismatch" in reasons, out["near_misses"]
+    assert out["allowed"] is False

@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest casbin
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      - name: Smoke test the CLI
+        run: |
+          python doctor.py validate-model --model tests/real_data/basic_model.conf
+          python doctor.py diagnose --model tests/real_data/basic_model.conf --policy tests/real_data/basic_policy.csv
+          python doctor.py explain-deny --model tests/real_data/rbac_model.conf --policy tests/real_data/rbac_policy.csv --sub alice --obj data1 --act read
