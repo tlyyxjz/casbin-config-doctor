@@ -50,6 +50,46 @@ def test_validate_model_missing_sections():
     assert "policy_definition" in msgs and "policy_effect" in msgs
 
 
+# real garbage matcher from apache/casbin-editor #162 (filed by hsluoyz)
+EDITOR162_MODEL = """[request_definition]
+r = sub, obj, act
+
+[policy_definition]
+p = sub, obj, act
+
+[policy_effect]
+e = some(where (p.eft == allow))
+
+[matchers]
+m = r.sub == p.sub22222 && r.obj11111 == ppppppp && r..act == p.act,,,,,,,,,,
+"""
+
+
+def test_validate_model_catches_editor162_garbage():
+    out = handler.validate_model({"model_conf": EDITOR162_MODEL})
+    msgs = " ".join(i["message"] for i in out["issues"])
+    assert out["valid"] is False
+    assert "p.sub22222" in msgs          # undefined policy var
+    assert "r.obj11111" in msgs          # undefined request var
+    assert "unrecognized identifier" in msgs      # bare unknown identifier
+    assert "malformed member access" in msgs  # r..act
+    assert "comma outside a function call" in msgs  # trailing ,,,,,
+
+
+def test_validate_model_abac_nested_and_custom_fn_warns():
+    # ABAC nested access r.obj.Owner must NOT be flagged;
+    # unknown function call is a warning (may be registered via AddFunction)
+    model = GOOD_MODEL.replace(
+        "m = g(r.sub, p.sub) && r.obj == p.obj && r.act == p.act",
+        "m = r.obj.Owner == r.sub && r.act == p.act && customFn(r.obj, p.obj)")
+    out = handler.validate_model({"model_conf": model})
+    msgs = " ".join(i["message"] for i in out["issues"])
+    assert not any("r.obj.Owner" in i["message"] for i in out["issues"])
+    assert "customFn" in msgs
+    assert all(i["severity"] != "error" or "customFn" not in i["message"]
+               for i in out["issues"])
+
+
 def test_check_policy_ok():
     out = handler.check_policy({"model_conf": GOOD_MODEL, "policy_line": "p, alice, data1, read"})
     assert out["ok"] is True and out["expected_tokens"] == 4

@@ -82,6 +82,7 @@ def validate_model(inputs, context=None):
             if var.startswith("p.") and dotvar not in pol_vars:
                 issues.append({"line": None, "severity": "error",
                                "message": "matcher '%s' uses %s but policy_definition does not define it" % (mname, var)})
+        issues.extend(_check_matcher_expr(mname, expr))
 
     errors = [i for i in issues if i["severity"] == "error"]
     return {
@@ -109,6 +110,77 @@ def _def_vars(sections, section):
             if name and name not in out:
                 out.append(name)
     return out
+
+
+# Built-in matcher functions from casbin (govaluate-expressions context).
+_BUILTIN_FUNCS = {
+    "g", "keyMatch", "keyMatch2", "keyMatch3", "keyMatch4", "keyMatch5",
+    "regexMatch", "ipMatch", "globMatch",
+}
+_BUILTIN_KEYWORDS = {"true", "false", "in"}
+
+_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+_DOTTED_RE = re.compile(r"\b[rp]\.(?![A-Za-z_]\w*)")
+
+
+def _check_matcher_expr(mname, expr):
+    """Lightweight syntax/semantics checks on one matcher expression.
+
+    Catches the classes of garbage seen in real bug reports
+    (apache/casbin-editor #162): undefined bare identifiers such as
+    'pppppppp', malformed member accesses like 'r..act', commas floating
+    outside any function call, and unbalanced parentheses.
+    Returns a list of issue dicts (never raises).
+    """
+    issues = []
+
+    # malformed member access: r. or p. not followed by an identifier
+    for m in _DOTTED_RE.finditer(expr):
+        frag = expr[m.start():m.start() + 12]
+        issues.append({"line": None, "severity": "error",
+                       "message": "matcher '%s' has a malformed member access near '%s' "
+                                  "(expected r.xxx or p.xxx)" % (mname, frag)})
+
+    # commas / parens balance, ignoring string literals and paren nesting
+    depth = 0
+    for ch in expr:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                break
+        elif ch == "," and depth == 0:
+            issues.append({"line": None, "severity": "error",
+                           "message": "matcher '%s' has a comma outside a function call "
+                                      "(commas are only valid inside g(...)/keyMatch(...) style calls)" % mname})
+            break
+    if depth != 0:
+        issues.append({"line": None, "severity": "error",
+                       "message": "matcher '%s' has unbalanced parentheses" % mname})
+
+    # strip string literals, then inspect bare identifiers
+    cleaned = re.sub(r'"[^"]*"', '""', re.sub(r"'[^']*'", "''", expr))
+    for m in _IDENT_RE.finditer(cleaned):
+        tok = m.group(0)
+        prev_ch = cleaned[m.start() - 1] if m.start() > 0 else ""
+        if prev_ch == "." or "." in cleaned[m.start():m.end() + 1]:
+            continue  # part of a dotted r.xxx/p.xxx token, handled by cross-check
+        if tok.lower() in _BUILTIN_KEYWORDS:
+            continue
+        nxt = cleaned[m.end():].lstrip()[:1]
+        if tok in _BUILTIN_FUNCS:
+            continue
+        if nxt == "(":
+            issues.append({"line": None, "severity": "warning",
+                           "message": "matcher '%s' calls '%s(...)' which is not a built-in function; "
+                                      "if it is a custom function, ensure it is registered on the "
+                                      "enforcer (AddFunction), otherwise this is a typo" % (mname, tok)})
+        else:
+            issues.append({"line": None, "severity": "error",
+                           "message": "matcher '%s' uses unrecognized identifier '%s' "
+                                      "(not defined in request/policy definitions, not a built-in function)" % (mname, tok)})
+    return issues
 
 
 # --------------------------------------------------------------------------
