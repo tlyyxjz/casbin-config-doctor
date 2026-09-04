@@ -125,6 +125,25 @@ def test_compare():
     assert out["unchanged"] == ["p,u1,d1,read"]
 
 
+def test_parse_handles_utf8_bom():
+    """Files saved by Windows editors / Excel / copied from the web often start
+    with a UTF-8 BOM (U+FEFF). A leading BOM must not break parsing — otherwise
+    the first [section] header and the first policy rule are silently skipped,
+    which made explain-deny return an empty near_misses for valid configs."""
+    bom = "\ufeff"
+    model = bom + GOOD_MODEL
+    policy = bom + POLICY
+    mv = handler.validate_model({"model_conf": model})
+    assert mv["valid"] is True, mv
+    parsed = handler.parse_policy(policy)
+    assert parsed[0]["tokens"][0] == "p", parsed[0]["tokens"]
+    # explain-deny must still attribute the near-miss on the BOM-prefixed input
+    out = handler.explain_deny({"model_conf": model, "policy_csv": policy,
+                                "sub": "alice", "obj": "data2", "act": "write"})
+    assert out["allowed"] is False
+    assert out["near_misses"], "BOM-prefixed config must still yield near-misses"
+
+
 DOMAIN_MODEL = """[request_definition]
 r = sub, dom, obj, act
 

@@ -141,6 +141,17 @@ $ python -m pytest tests/ -q
 - **Evidence over guessing** — denials come with near-miss rules and only the fields that actually failed, never a false accusation
 - **No network** — nothing leaves your machine
 
+## What Doctor does NOT do (yet)
+
+Doctor reasons about `model.conf` / `policy.csv` and the `enforce()` *result*. It is not a substitute for the casbin library itself. Explicitly out of scope:
+
+- **Function matchers** — `keyMatch` / `keyMatch2` / `regexMatch` / `ipMatch` etc. Doctor compares fields by exact value or `*` wildcard only. If your matcher uses a function, the verdict is best-effort and you should confirm against the real library.
+- **ABAC struct comparison** — `r.sub == r.obj.owner` style attribute checks are not evaluated; Doctor only does positional field matching.
+- **`deny`-override / priority effects** — if your `policy_effect` uses priority or a deny-override scheme, Doctor reports the matching rule but does not simulate the effect combination.
+- **Policy *persistence* bugs** — if your rules vanished from the DB because integration code did `ClearCasbin` + `AddPolicies` and `AddPolicies` errored (a common gin-vue-admin / go-admin footgun), that is a code bug, not a model mismatch. Doctor can't see it from a single config — but `compare` will show exactly which rules disappeared if you give it a before/after policy snapshot.
+
+**Robustness:** Doctor strips a UTF-8 BOM if present, so configs copied from Excel / Windows editors / the web parse correctly (a leading BOM used to silently break the first section header and the first policy rule).
+
 ## License
 
 MIT © 2026 tlyyxjz

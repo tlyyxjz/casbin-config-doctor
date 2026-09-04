@@ -24,6 +24,10 @@ REQUIRED_SECTIONS = {
 
 def parse_model(model_conf):
     """Parse model.conf into {section: {key: value}} plus syntax issues."""
+    # Drop a UTF-8 BOM if present. Files saved by Windows editors / Excel /
+    # copied from the web often start with U+FEFF, which would otherwise make
+    # the first [section] header fail to match and silently break everything.
+    model_conf = model_conf.replace("\ufeff", "")
     sections = {}
     issues = []
     current = None
@@ -114,6 +118,9 @@ def _def_vars(sections, section):
 def parse_policy(policy_csv):
     """Return (rules, comments) where rules = [{'line': n, 'tokens': [...],
     'rule_type': 'p'|'g', 'domain': str|None}] blank/comment lines skipped."""
+    # Strip UTF-8 BOM (see parse_model) — a leading BOM turns the first rule's
+    # type token into e.g. '\ufeffp', which would be skipped as a non-p/g rule.
+    policy_csv = policy_csv.replace("\ufeff", "")
     rules = []
     for lineno, raw in enumerate(policy_csv.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
