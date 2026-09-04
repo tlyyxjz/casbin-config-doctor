@@ -300,6 +300,7 @@ def explain_deny(inputs, context=None):
                 failures.append({"line": r["line"], "rule": ",".join(r["tokens"]), "why_not": why})
 
         matcher = next(iter((sections.get("matchers") or {}).values()), "")
+
     return {
         "request": dict(zip(req_vars, rvals)) if len(req_vars) == len(rvals) else {"sub": sub, "obj": obj, "act": act},
         "roles_considered": sorted(roles_of),
@@ -312,12 +313,16 @@ def explain_deny(inputs, context=None):
 
 
 def _deny_advice(matched, roles_of, sub, failures):
+    # 下游 #730: 当 near-miss 是 subject 字段不匹配(角色未用 g 链上)时, 直接提示补 g 赋值
+    sub_mismatch = any("sub mismatch" in w for f in (failures or []) for w in f.get("why_not", []))
+    g_hint = (" The subject field does not match: if '%s' should inherit the policy's role, "
+              "add a g assignment (e.g. g, %s, <role>)." % (sub, sub)) if sub_mismatch else ""
     if matched:
         return "Request matches policy; if it is still denied, check policy_effect (e.g. a priority/deny effect) and the matcher expression."
     if len(roles_of) > 1:
-        return "No policy matched even after expanding roles %s. Either add a p rule for one of these subjects, or check the matcher." % sorted(roles_of - {sub})
+        return "No policy matched even after expanding roles %s. Either add a p rule for one of these subjects, or check the matcher.%s" % (sorted(roles_of - {sub}), g_hint)
     if failures:
-        return "Closest rule(s) listed in near_misses - the request fails on the listed field(s). Add a matching p rule or fix the request."
+        return "Closest rule(s) listed in near_misses - the request fails on the listed field(s).%s" % g_hint
     return "No p rules relate to this request at all. Add a policy rule covering '%s'." % sub
 
 
@@ -331,24 +336,19 @@ def diagnose(inputs, context=None):
     for i in mv["issues"]:
         issues.append({"check": "validate_model", **i})
 
-    sections, _ = parse_model(model_conf)
-    expected = _policy_token_count(sections)
-    rules = parse_policy(policy_csv)
-    for r in rules:
-        if r["rule_type"] == "p" and expected and len(r["tokens"]) != expected:
-            issues.append({"check": "token_count", "line": r["line"], "severity": "error",
-                           "message": "rule '%s' has %d tokens, model expects %d"
-                                      % (",".join(r["tokens"]), len(r["tokens"]), expected)})
-
-    dup = detect_duplicates({"policy_csv": policy_csv})
-    for d in dup["duplicates"]:
-        issues.append({"check": "duplicates", "line": d["line"], "severity": "warning",
-                       "message": "duplicate of line %d: %s" % (d["first_seen_line"], d["rule"])})
-
     cyc = detect_role_cycle({"policy_csv": policy_csv})
     for c in cyc["cycles"]:
         issues.append({"check": "role_cycle", "line": None, "severity": "error",
                        "message": "role inheritance cycle: " + " -> ".join(c)})
+
+    # lint_policy 一次性覆盖 duplicates / token_count / dead-assignment /
+    # orphan-policy / domain-mismatch, 避免与 diagnose 重复计数
+    lint = lint_policy({"model_conf": model_conf, "policy_csv": policy_csv})
+    for f in lint["findings"]:
+        issues.append({"check": f["check"],
+                       "line": f.get("line"),
+                       "severity": f.get("severity", "warning"),
+                       "message": f["message"]})
 
     # exact-duplicate subject+object with conflicting actions is fine, but
     # identical p rules with different effects would be - kept simple for v0.1
@@ -469,4 +469,123 @@ def compare(inputs, context=None):
         "added": sorted(set(b) - set(a)),
         "removed": sorted(set(a) - set(b)),
         "unchanged": sorted(set(a) & set(b)),
+    }
+
+
+def lint_policy(inputs, context=None):
+    """策略引用完整性检查 —— 定位「权限配了却不生效」类问题。
+
+    对应下游真实 case: go-admin #730(配了权限但不生效)。
+    检查项:
+      1. dead_assignment: g 赋值的角色没有任何 p 规则 -> 授权无效
+      2. orphan_policy:   p 规则的 subject 不可达(无用户经 g 链到它, 也非直接请求主体)
+      3. domain_mismatch: domains 模型下, p 规则所在域无对应 g 链接
+      4. duplicates:      重复 p 规则(AddPolicies 遇重复会失败并可能清空角色权限)
+      5. token_count:     p 规则 token 数与 model 定义不符
+    无 g 规则的 basic/ACL 模型下, p.sub 即直接请求主体, 不报 orphan/dead。
+    """
+    sections, _ = parse_model(inputs["model_conf"])
+    rules = parse_policy(inputs["policy_csv"])
+    pol_vars = list(_def_vars(sections, "policy_definition"))
+
+    # 角色继承参数: g = _,_ 是 2 元; domains 模型 g = _,_,_ 是 3 元
+    g_params = 2
+    for expr in (sections.get("role_definition") or {}).values():
+        n = len([t for t in expr.split(",") if t.strip()])
+        g_params = max(g_params, n)
+
+    has_roles = bool(sections.get("role_definition")) or g_params >= 3
+
+    # g 继承图
+    edges = defaultdict(set)
+    g_children, g_parents = set(), set()
+    for r in rules:
+        if r["rule_type"] != "g" or len(r["tokens"]) < 3:
+            continue
+        child, parent = r["tokens"][1], r["tokens"][2]
+        g_children.add(child)
+        g_parents.add(parent)
+        edges[child].add(parent)
+
+    def reachable_from(child):
+        seen, stack = set(), [child]
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            stack.extend(edges.get(cur, ()))
+        return seen
+
+    # p 规则的 subject 集合
+    p_subjects = set()
+    for r in rules:
+        if r["rule_type"] == "p" and len(r["tokens"]) >= 2:
+            p_subjects.add(r["tokens"][1])
+
+    findings = []
+
+    # 1 + 2: 仅在 RBAC / domains 模型(存在角色)时检查 dead/orphan
+    if has_roles:
+        reachable = set()
+        for u in g_children:
+            reachable |= reachable_from(u)
+        for parent in sorted(g_parents):
+            if parent not in p_subjects:
+                findings.append({
+                    "check": "dead_assignment", "severity": "warning",
+                    "subject": parent,
+                    "message": "role '%s' is assigned to users via g, but no p rule grants it any permission — the assignment grants nothing" % parent,
+                })
+        for subj in sorted(p_subjects):
+            if subj in reachable or subj in g_children:
+                continue
+            findings.append({
+                "check": "orphan_policy", "severity": "warning",
+                "subject": subj,
+                "message": "p rule subject '%s' is unreachable: no g assignment links any user to it (and it is not a direct request subject) — the rule can never allow anyone" % subj,
+            })
+
+    # 3: domains 模型域不匹配
+    if g_params >= 3 and len(pol_vars) >= 3:
+        p_doms = set()
+        g_doms = set()
+        for r in rules:
+            if r["rule_type"] == "p" and len(r["tokens"]) >= 4:
+                p_doms.add(r["tokens"][2])  # p = sub, dom, obj, act
+            if r["rule_type"] == "g" and len(r["tokens"]) >= 4:
+                g_doms.add(r["tokens"][3])  # g = _, _, dom
+        for dom in sorted(p_doms):
+            if dom not in g_doms:
+                findings.append({
+                    "check": "domain_mismatch", "severity": "warning",
+                    "domain": dom,
+                    "message": "p rules exist for domain '%s' but no g (role) assignment exists in that domain — no user can reach them" % dom,
+                })
+
+    # 4: 重复 p 规则
+    dup = detect_duplicates({"policy_csv": inputs["policy_csv"]})
+    for d in dup["duplicates"]:
+        findings.append({
+            "check": "duplicates", "severity": "warning",
+            "line": d["line"],
+            "message": "duplicate of line %d: %s (AddPolicies fails on duplicates and can wipe role permissions)" % (d["first_seen_line"], d["rule"]),
+        })
+
+    # 5: arity 不匹配
+    expected = _policy_token_count(sections)
+    for r in rules:
+        if r["rule_type"] == "p" and expected and len(r["tokens"]) != expected:
+            findings.append({
+                "check": "token_count", "severity": "error",
+                "line": r["line"],
+                "message": "rule '%s' has %d tokens, model expects %d" % (",".join(r["tokens"]), len(r["tokens"]), expected),
+            })
+
+    errors = sum(1 for f in findings if f.get("severity") == "error")
+    warnings = sum(1 for f in findings if f.get("severity") == "warning")
+    return {
+        "healthy": errors == 0,
+        "findings": findings,
+        "summary": "%d finding(s): %d error(s), %d warning(s)" % (len(findings), errors, warnings),
     }
