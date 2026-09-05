@@ -158,9 +158,9 @@ $ python -m pytest tests/ -q
 
 Doctor reasons about `model.conf` / `policy.csv` and the `enforce()` *result*. It is not a substitute for the casbin library itself. Explicitly out of scope:
 
-- **Function matchers** — `keyMatch` / `keyMatch2` / `regexMatch` / `ipMatch` etc. Doctor compares fields by exact value or `*` wildcard only. If your matcher uses a function, the verdict is best-effort and you should confirm against the real library.
+- **Matcher functions, partially** — `keyMatch`, `keyMatch2`/`keyMatch3`, `regexMatch` and `globMatch` are evaluated per position (detected from the matcher expression), so wildcard patterns like `tool:mcp/*` are matched with their real semantics. `ipMatch` and custom `AddFunction` matchers fall back to exact/`*` comparison — treat such verdicts as best-effort.
 - **ABAC struct comparison** — `r.sub == r.obj.owner` style attribute checks are not evaluated; Doctor only does positional field matching.
-- **`deny`-override / priority effects** — if your `policy_effect` uses priority or a deny-override scheme, Doctor reports the matching rule but does not simulate the effect combination.
+- **Effects, the common three** — `explain-deny` now evaluates the eft column under the three canonical effects: `some(where (p.eft == allow))` (default), `!some(where (p.eft == deny))` (deny-override), and `priority(p.eft) || deny` (first match wins — what casbin-gateway uses), and attributes the verdict to the winning line. Other effect expressions (e.g. `subjectPriority`) fall back to default semantics with a note.
 - **Policy *persistence* bugs** — if your rules vanished from the DB because integration code did `ClearCasbin` + `AddPolicies` and `AddPolicies` errored (a common gin-vue-admin / go-admin footgun), that is a code bug, not a model mismatch. Doctor can't see it from a single config — but `compare` will show exactly which rules disappeared if you give it a before/after policy snapshot.
 
 **Robustness:** Doctor strips a UTF-8 BOM if present, so configs copied from Excel / Windows editors / the web parse correctly (a leading BOM used to silently break the first section header and the first policy rule).

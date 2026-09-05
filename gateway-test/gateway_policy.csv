@@ -1,0 +1,4 @@
+p, claude-code, tool:mcp/github, use, allow
+p, claude-code, tool:mcp/*, use, deny
+p, claude-code, tool:*, use, allow
+p, claude-code, model:*, use, allow

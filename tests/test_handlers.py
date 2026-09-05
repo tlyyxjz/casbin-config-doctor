@@ -295,3 +295,102 @@ def test_validate_model_numeric_keys_and_builtin_role_managers():
     msgs = " ".join(i["message"] for i in out["issues"])
     assert "g2(...)" not in msgs and "g3(...)" not in msgs, out["issues"]
     assert out["valid"] is True, out["issues"]
+
+
+# ---------------------------------------------------------------------------
+# casbin-gateway 真实配置类：priority 效果 + 全 keyMatch + eft 列
+# （Apache casbin-gateway object/permission_casbin.go 的 PermissionModelText）
+# ---------------------------------------------------------------------------
+
+GATEWAY_MODEL = """[request_definition]
+r = sub, obj, act
+
+[policy_definition]
+p = sub, obj, act, eft
+
+[policy_effect]
+e = priority(p.eft) || deny
+
+[matchers]
+m = keyMatch(r.sub, p.sub) && keyMatch(r.obj, p.obj) && keyMatch(r.act, p.act)
+"""
+
+GATEWAY_POLICY = """p, claude-code, tool:mcp/github, use, allow
+p, claude-code, tool:mcp/*, use, deny
+p, claude-code, tool:*, use, allow
+p, claude-code, model:*, use, allow
+"""
+
+
+def _explain(model_conf, policy_csv, sub, obj, act):
+    return handler.explain_deny({
+        "model_conf": model_conf, "policy_csv": policy_csv,
+        "sub": sub, "obj": obj, "act": act,
+    })
+
+
+def test_gateway_priority_exact_allow_wins_is_allowed():
+    # 第 1 行精确 allow 按 priority 先赢，整体必须是 ALLOWED。
+    # 回归：修复前 eft 列导致所有规则被跳过，误判 DENIED。
+    out = _explain(GATEWAY_MODEL, GATEWAY_POLICY, "claude-code", "tool:mcp/github", "use")
+    assert out["allowed"] is True, out["advice"]
+    assert out["winning_rules"] and out["winning_rules"][0]["line"] == 1
+    assert out["winning_rules"][0]["eft"] == "allow"
+
+
+def test_gateway_priority_deny_wildcard_wins_is_denied():
+    # tool:mcp/slack：第 2 行 deny 通配按序先于第 3 行 allow 通配 -> DENIED，
+    # 且归因必须落在第 2 行。
+    out = _explain(GATEWAY_MODEL, GATEWAY_POLICY, "claude-code", "tool:mcp/slack", "use")
+    assert out["allowed"] is False
+    assert out["winning_rules"] and out["winning_rules"][0]["line"] == 2
+    assert out["winning_rules"][0]["eft"] == "deny"
+    assert "Line 2" in out["advice"] and "DENIED" in out["advice"]
+
+
+def test_gateway_keymatch_pattern_is_not_literal():
+    # 关键回归：'tool:mcp/*' 必须按 keyMatch 前缀语义匹配，
+    # 不能当字面量（修复前所有通配规则都"不相关"）。
+    out = _explain(GATEWAY_MODEL, GATEWAY_POLICY, "claude-code", "tool:websearch", "use")
+    rules = " ".join(r["rule"] for r in out["matching_rules"])
+    assert "tool:*" in rules, out["matching_rules"]
+    assert out["allowed"] is True
+
+
+def test_gateway_unrelated_subject_reports_near_miss_with_g_hint():
+    # 无关 subject 命中 model:* 通配、只在 sub 位置失败：DENIED，
+    # near-miss 精确归因到 sub，并提示补 g 赋值（比笼统的"没有相关规则"更有用）。
+    out = _explain(GATEWAY_MODEL, GATEWAY_POLICY, "other-agent", "model:deepseek", "use")
+    assert out["allowed"] is False
+    assert out["winning_rules"] == []
+    assert any("sub mismatch" in w for f in out["near_misses"] for w in f["why_not"]), out["near_misses"]
+    assert "g assignment" in out["advice"]
+
+
+def test_gateway_keymatch_near_miss_note_names_the_pattern():
+    # near-miss 归因要写清是 keyMatch 模式不匹配，而不是笼统的字符串不等。
+    out = _explain(GATEWAY_MODEL, GATEWAY_POLICY, "claude-code", "tool:mcp/slack", "use")
+    notes = " ".join(w for f in out["near_misses"] for w in f["why_not"])
+    assert "keyMatch pattern" in notes, out["near_misses"]
+
+
+def test_deny_override_effect_blocks_when_any_deny_matches():
+    model_conf = GATEWAY_MODEL.replace(
+        "e = priority(p.eft) || deny",
+        "e = !some(where (p.eft == deny))",
+    )
+    out = _explain(model_conf, GATEWAY_POLICY, "claude-code", "tool:mcp/slack", "use")
+    assert out["allowed"] is False  # line 2 deny matched -> deny-override wins
+
+    # 只有 allow 命中时放行
+    policy = "p, claude-code, tool:web*, use, allow\np, claude-code, tool:mcp/*, use, deny\n"
+    out = _explain(model_conf, policy, "claude-code", "tool:websearch", "use")
+    assert out["allowed"] is True
+
+
+def test_default_effect_with_eft_column_ignores_deny_lines():
+    # 默认效果 some(where (p.eft == allow))：deny 行存在但只要也有 allow 命中就放行
+    model_conf = GATEWAY_MODEL.replace("e = priority(p.eft) || deny",
+                                       "e = some(where (p.eft == allow))")
+    out = _explain(model_conf, GATEWAY_POLICY, "claude-code", "tool:mcp/slack", "use")
+    assert out["allowed"] is True

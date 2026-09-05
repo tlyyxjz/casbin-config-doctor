@@ -325,6 +325,14 @@ def explain_deny(inputs, context=None):
 
     原理：按 request_definition / policy_definition 的字段定义对齐请求值与
     策略值，逐字段比对（含角色展开和通配符），给出归因。
+
+    效果语义感知（casbin-gateway 真实配置驱动）：
+    - policy_definition 含 eft 列（如 p = sub, obj, act, eft）时，该列不参与
+      请求对齐，而是作为效果值参与 policy_effect 评估；
+    - 识别三种经典 policy_effect：allow-override（默认）、deny-override、
+      priority（第一条匹配的规则定胜负，casbin-gateway 用的就是它）；
+    - matcher 里的 keyMatch/keyMatch2/regexMatch/globMatch 按各自通配语义
+      求值，而不是把 'tool:mcp/*' 当字面量。
     """
     sections, _ = parse_model(inputs["model_conf"])
     rules = parse_policy(inputs["policy_csv"])
@@ -333,6 +341,12 @@ def explain_deny(inputs, context=None):
 
     req_vars = list(_def_vars(sections, "request_definition"))
     pol_vars = list(_def_vars(sections, "policy_definition"))
+    matcher = next(iter((sections.get("matchers") or {}).values()), "")
+    effect_expr = next(iter((sections.get("policy_effect") or {}).values()), "")
+
+    # eft 列位置：存在则不参与请求对齐（casbin-gateway: p = sub, obj, act, eft）
+    eft_idx = pol_vars.index("eft") if "eft" in pol_vars else None
+    align = [i for i in range(len(pol_vars)) if i != eft_idx]
 
     # 角色继承参数：g = _,_ 是 2 元；domains 模型 g = _,_,_ 是 3 元
     g_params = 2
@@ -362,58 +376,168 @@ def explain_deny(inputs, context=None):
     else:
         rvals = [sub, obj, act]
 
-    def field_match(pv, rv):
-        return pv == rv or pv == "*"
+    # matcher 里每个策略字段用的比较函数（按名映射到位置）
+    field_fns = _matcher_field_fns(matcher, pol_vars)
+    sub_pidx = next((i for i in align if pol_vars[i].lower() == "sub"), None)
 
-    sub_pos = 0 if pol_vars and "sub" in pol_vars[0].lower() else None
-    matcher = next(iter((sections.get("matchers") or {}).values()), "")
     candidates, failures = [], []
     matched_any = False
     for r in rules:
         if r["rule_type"] != "p":
             continue
         pvals = r["tokens"][1:]
-        if len(pvals) != len(rvals):
-            continue  # token 数不匹配的规则由 diagnose 负责报错
-        checks = []
-        for idx, (pv, rv) in enumerate(zip(pvals, rvals)):
-            ok = pv == rv or pv == "*"
-            if not ok and idx == 0 and pv in roles_of:
+        if len(pvals) != len(pol_vars):
+            continue  # 列数与 policy_definition 不符的规则由 diagnose 负责报错
+        if len(align) != len(rvals):
+            continue  # 定义列数与请求列数不一致，静态归因不可靠，交给报错路径
+        checks, why = [], []
+        for ridx, pidx in enumerate(align):
+            pv, rv = pvals[pidx], rvals[ridx]
+            fn = field_fns.get(pidx, "eq")
+            ok = _fn_field_match(fn, pv, rv)
+            label = pol_vars[pidx] if pidx < len(pol_vars) else str(pidx)
+            if not ok and pidx == sub_pidx and pv in roles_of:
                 ok = True  # subject 位置走角色展开
+            if not ok:
+                why.append(_fn_mismatch_note(fn, label, pv, rv))
             checks.append(ok)
         if all(checks):
             matched_any = True
-            candidates.append({"line": r["line"], "rule": ",".join(r["tokens"])})
+            eft = (pvals[eft_idx] if eft_idx is not None else "allow").lower()
+            candidates.append({"line": r["line"], "rule": ",".join(r["tokens"]),
+                               "eft": eft})
         else:
-            why = []
-            for idx, (pv, rv) in enumerate(zip(pvals, rvals)):
-                if pv == rv or pv == "*":
-                    continue
-                # subject 位置若通过角色继承匹配上，就不是失败原因，不能报
-                if idx == 0 and pv in roles_of:
-                    continue
-                why.append(f"{pol_vars[idx] if idx < len(pol_vars) else idx} mismatch: policy has '{pv}', request is '{rv}'")
-            if sum(checks) >= len(pvals) - 1:
-                failures.append({"line": r["line"], "rule": ",".join(r["tokens"]), "why_not": why})
+            if sum(checks) >= len(align) - 1:
+                failures.append({"line": r["line"], "rule": ",".join(r["tokens"]),
+                                 "why_not": why})
 
-        matcher = next(iter((sections.get("matchers") or {}).values()), "")
+    effect_kind = _effect_kind(effect_expr)
+    allowed, winning = _evaluate_effect(effect_kind, candidates)
 
     return {
         "request": dict(zip(req_vars, rvals)) if len(req_vars) == len(rvals) else {"sub": sub, "obj": obj, "act": act},
         "roles_considered": sorted(roles_of),
-        "allowed": bool(candidates),
+        "allowed": allowed,
         "matching_rules": candidates,
+        "winning_rules": winning,
+        "effect": {"kind": effect_kind, "expression": effect_expr},
         "near_misses": failures[:10],
         "matcher": matcher,
-        "advice": _deny_advice(matched_any, roles_of, sub, failures),
+        "advice": _deny_advice(matched_any, roles_of, sub, failures, effect_kind,
+                               candidates, winning, obj),
     }
 
 
-def _deny_advice(matched, roles_of, sub, failures):
+def _matcher_field_fns(matcher, pol_vars):
+    """Map each policy-field position to the matcher function applied to it.
+
+    Recognizes fn(r.X, p.X) calls for known matcher functions and plain
+    r.X == p.X comparisons ("eq"). Positions not mentioned fall back to "eq".
+    """
+    fns = {}
+    for m in re.finditer(r"(\w+)\(\s*r\.(\w+)\s*,\s*p\.(\w+)\s*\)", matcher or ""):
+        fn, pname = m.group(1), m.group(3)
+        if fn in _BUILTIN_FUNCS and pname in pol_vars:
+            fns.setdefault(pol_vars.index(pname), fn)
+    for m in re.finditer(r"r\.(\w+)\s*==\s*p\.(\w+)", matcher or ""):
+        pname = m.group(2)
+        if pname in pol_vars:
+            fns.setdefault(pol_vars.index(pname), "eq")
+    return fns
+
+
+def _fn_field_match(fn, pv, rv):
+    """Evaluate one position under the matcher function's real semantics."""
+    if pv == "*":
+        return True
+    try:
+        if fn == "keyMatch":
+            return _key_match(rv, pv)
+        if fn in ("keyMatch2", "keyMatch3"):
+            return _key_match2(rv, pv)
+        if fn == "regexMatch":
+            return re.search(pv, rv) is not None
+        if fn == "globMatch":
+            import fnmatch
+            return fnmatch.fnmatch(rv, pv)
+    except re.error:
+        return False
+    return pv == rv  # "eq" and unknown functions: literal comparison
+
+
+def _key_match(rv, pv):
+    """Go casbin keyMatch: pattern may end with (or contain) a literal '*'."""
+    i = pv.find("*")
+    if i == -1:
+        return rv == pv
+    if len(rv) > i:
+        return rv[:i] == pv[:i]
+    return rv == pv[:i]
+
+
+def _key_match2(rv, pv):
+    """Go casbin keyMatch2: '/foo/:id' path params plus '/*' wildcards."""
+    pattern = pv.replace("/*", "/.*")
+    pattern = re.sub(r":(?=[^/])[^/]*", r"[^/]*", pattern)
+    return re.search(pattern, rv) is not None
+
+
+def _fn_mismatch_note(fn, label, pv, rv):
+    if fn == "keyMatch" and "*" in pv:
+        prefix = pv[:pv.find("*")]
+        return ("%s mismatch: '%s' does not match keyMatch pattern '%s' (prefix '%s')"
+                % (label, rv, pv, prefix))
+    if fn == "eq":
+        return "%s mismatch: policy has '%s', request is '%s'" % (label, pv, rv)
+    return "%s mismatch: '%s' does not match %s pattern '%s'" % (label, rv, fn, pv)
+
+
+def _effect_kind(effect_expr):
+    """Classify the policy_effect expression into a known evaluation kind."""
+    e = (effect_expr or "").lower().replace(" ", "")
+    if "priority(p.eft" in e:
+        return "priority"
+    if "!some" in e or e.startswith("!(") or "!deny" in e:
+        return "deny_override"
+    if "subjectpriority" in e:
+        return "subject_priority"  # not statically evaluatable; default fallback
+    return "allow_override"
+
+
+def _evaluate_effect(effect_kind, candidates):
+    """Return (allowed, winning_rules) for the matched lines, in file order."""
+    if effect_kind == "priority":
+        if candidates:
+            first = candidates[0]
+            return first["eft"] == "allow", [first]
+        return False, []
+    has_eft = any("eft" in c for c in candidates)
+    if effect_kind == "deny_override":
+        denies = [c for c in candidates if c.get("eft") == "deny"]
+        allows = [c for c in candidates if c.get("eft") != "deny"]
+        allowed = allows and not denies
+        return allowed, (denies if denies else allows)
+    # allow_override (default): some(where (p.eft == allow))
+    if has_eft:
+        allows = [c for c in candidates if c.get("eft") == "allow"]
+        return bool(allows), allows
+    return bool(candidates), candidates
+
+
+def _deny_advice(matched, roles_of, sub, failures, effect_kind="allow_override",
+                 candidates=None, winning=None, obj=None):
     # 下游 #730: 当 near-miss 是 subject 字段不匹配(角色未用 g 链上)时, 直接提示补 g 赋值
     sub_mismatch = any("sub mismatch" in w for f in (failures or []) for w in f.get("why_not", []))
     g_hint = (" The subject field does not match: if '%s' should inherit the policy's role, "
               "add a g assignment (e.g. g, %s, <role>)." % (sub, sub)) if sub_mismatch else ""
+    if winning:
+        w = winning[0]
+        if w.get("eft") == "deny":
+            return ("Line %d matched and DENIED this request (effect: %s). "
+                    "Reorder rules, narrow the deny pattern, or change this line's eft.%s"
+                    % (w["line"], effect_kind, g_hint))
+        return ("Request matches policy (line %d, allow); if the engine still denies, "
+                "check the runtime matcher functions (e.g. AddFunction) against this static analysis." % w["line"])
     if matched:
         return "Request matches policy; if it is still denied, check policy_effect (e.g. a priority/deny effect) and the matcher expression."
     if len(roles_of) > 1:
