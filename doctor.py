@@ -30,6 +30,7 @@ COMMANDS = (
     "detect-role-cycle",
     "generate",
     "compare",
+    "lint",
 )
 
 
@@ -124,6 +125,11 @@ def build_parser():
     p.add_argument("--policy-b", required=True, help="path to the new policy.csv")
     p.add_argument("--json", action="store_true", help="emit raw JSON")
 
+    p = sub.add_parser("lint", help="policy reference-integrity lint (orphan/dead-assignment/domain)")
+    p.add_argument("--model", required=True, help="path to model.conf")
+    p.add_argument("--policy", required=True, help="path to policy.csv")
+    p.add_argument("--json", action="store_true", help="emit raw JSON")
+
     return parser
 
 
@@ -201,6 +207,22 @@ def run(args):
         })
         dump(result)
         return 0
+
+    if args.command == "lint":
+        result = handler.lint_policy({
+            "model_conf": read(args.model),
+            "policy_csv": read(args.policy),
+        })
+        if args.json:
+            dump(result)
+        else:
+            print(result["summary"])
+            for f in result["findings"]:
+                location = "line %s" % f["line"] if f.get("line") else "-"
+                print("  [%s] %s (%s) %s" % (
+                    f.get("severity", "info").upper(), location,
+                    f.get("check", "-"), f["message"]))
+        return 0 if result["healthy"] else 1
 
     return 1
 

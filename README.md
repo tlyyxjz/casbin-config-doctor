@@ -43,22 +43,35 @@ python doctor.py explain-deny --model model.conf --policy policy.csv \
 # multi-tenant (domains) models take an extra --dom
 python doctor.py explain-deny --model model.conf --policy policy.csv \
     --sub alice --obj data2 --act read --dom domain1
+
+# "I set the permission but it doesn't work" — find unreachable rules
+python doctor.py lint --model model.conf --policy policy.csv
 ```
 
 Add `--json` to any command for machine-readable output.
 
-## Commands (8)
+## Commands (9)
 
 | Command | What it does |
 |---|---|
 | `diagnose` | Full check-up: model syntax + token counts + duplicates + role cycles, with severity-rated issue list |
-| `explain-deny` | Step-by-step explanation of a denied request: roles considered, matching rules, **near-miss rules with the exact failing field** |
+| `explain-deny` | Step-by-step explanation of a denied request: roles considered, matching rules, **near-miss rules with the exact failing field**; when the subject field is the mismatch it also suggests the `g` assignment to add |
 | `validate-model` | Check `model.conf` structure: required sections, empty sections, matcher↔definition variable cross-check |
 | `check-policy` | Validate one policy line's token count against the model's `policy_definition` |
 | `detect-duplicates` | Find duplicate policy rules (with first-seen line numbers) |
 | `detect-role-cycle` | Detect inheritance cycles in `g` rules via DFS |
 | `generate` | Plain-language requirement → `model.conf` + `policy.csv` (RBAC / RESTful / ABAC templates) |
 | `compare` | Diff two policy files: added / removed / unchanged |
+| `lint` | Policy reference-integrity: **dead `g` assignments** (role has no p rule), **orphan p rules** (subject unreachable via `g`), **domain mismatches** (domains models), duplicates, token counts — catches the "permission is configured but never takes effect" class of bugs |
+
+### Example: `lint` on a broken policy
+
+```text
+$ python doctor.py lint --model model.conf --policy policy.csv
+2 finding(s): 0 error(s), 2 warning(s)
+  [WARNING] - (dead_assignment) role 'superadmin' is assigned to users via g, but no p rule grants it any permission — the assignment grants nothing
+  [WARNING] - (orphan_policy) p rule subject 'ghost' is unreachable: no g assignment links any user to it (and it is not a direct request subject) — the rule can never allow anyone
+```
 
 ## Example: explaining a denial
 
