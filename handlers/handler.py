@@ -12,7 +12,7 @@ from collections import defaultdict
 # --------------------------------------------------------------------------
 
 _SECTION_RE = re.compile(r"^\s*\[([a-z_]+)\]\s*$")
-_KV_RE = re.compile(r"^\s*([A-Za-z_]+)\s*=\s*(.+?)\s*$")
+_KV_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
 
 REQUIRED_SECTIONS = {
     "request_definition": "r",
@@ -23,7 +23,13 @@ REQUIRED_SECTIONS = {
 
 
 def parse_model(model_conf):
-    """Parse model.conf into {section: {key: value}} plus syntax issues."""
+    """Parse model.conf into {section: {key: value}} plus syntax issues.
+
+    Accepts the syntax casbin's own Config loader handles:
+    - inline ``;`` comments (``g = _, _ ; domain roles``) and ``#`` comments
+    - trailing ``\\`` line continuations (multi-line matchers)
+    - a UTF-8 BOM
+    """
     # Drop a UTF-8 BOM if present. Files saved by Windows editors / Excel /
     # copied from the web often start with U+FEFF, which would otherwise make
     # the first [section] header fail to match and silently break everything.
@@ -31,8 +37,17 @@ def parse_model(model_conf):
     sections = {}
     issues = []
     current = None
+    pending_key = None  # key of a continued value (trailing backslash)
     for lineno, raw in enumerate(model_conf.splitlines(), 1):
-        line = raw.split("#", 1)[0].strip()
+        line = raw.split("#", 1)[0].split(";", 1)[0].rstrip()
+        if pending_key is not None:
+            if not line:
+                continue
+            cont = (line[:-1] if line.endswith("\\") else line).strip()
+            sections[current][pending_key] += " " + cont
+            if not line.endswith("\\"):
+                pending_key = None
+            continue
         if not line:
             continue
         m = _SECTION_RE.match(line)
@@ -49,7 +64,15 @@ def parse_model(model_conf):
             issues.append({"line": lineno, "severity": "error",
                            "message": "expected 'key = value' inside [%s]" % current})
             continue
-        sections[current][kv.group(1)] = kv.group(2)
+        value = kv.group(2).strip()
+        if value.endswith("\\"):
+            sections[current][kv.group(1)] = value[:-1].rstrip()
+            pending_key = kv.group(1)
+        else:
+            sections[current][kv.group(1)] = value
+    if pending_key is not None:
+        issues.append({"line": None, "severity": "error",
+                       "message": "unterminated line continuation for '%s'" % pending_key})
     return sections, issues
 
 
@@ -117,6 +140,8 @@ _BUILTIN_FUNCS = {
     "g", "keyMatch", "keyMatch2", "keyMatch3", "keyMatch4", "keyMatch5",
     "regexMatch", "ipMatch", "globMatch",
 }
+# g2..g9 are casbin's built-in multi-token role managers (same family as g)
+_BUILTIN_ROLE_MANAGERS = re.compile(r"^g\d*$")
 _BUILTIN_KEYWORDS = {"true", "false", "in"}
 
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*")
@@ -169,7 +194,7 @@ def _check_matcher_expr(mname, expr):
         if tok.lower() in _BUILTIN_KEYWORDS:
             continue
         nxt = cleaned[m.end():].lstrip()[:1]
-        if tok in _BUILTIN_FUNCS:
+        if tok in _BUILTIN_FUNCS or _BUILTIN_ROLE_MANAGERS.match(tok):
             continue
         if nxt == "(":
             issues.append({"line": None, "severity": "warning",
