@@ -1,3 +1,5 @@
 casbin==1.43.0
-pytest==9.1.1
 simpleeval==1.0.7
+# pytest 9.x requires Python >= 3.10; 3.9 stays on the last pinned 8.x line
+pytest==9.1.1 ; python_version >= "3.10"
+pytest==8.4.2 ; python_version < "3.10"
