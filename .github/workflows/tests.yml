@@ -1,12 +1,20 @@
-name: tests
+# CI 强制卡点(执行标准 v1.2 §20.1):
+#   - 卡点定义:绕过必须留下记录 —— main 分支保护强制本 workflow 的全部检查通过
+#   - 20.2 供应链:依赖版本全部 pin(requirements-ci.txt);security job 跑密钥扫描 + 依赖漏洞审计
+#   - 变异测试(v1.2 §18.2)不进每次 CI(成本高),由周期任务/发版前人工执行并留档
+name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # 20.2 月度全量安全扫描(每月 1 日 03:17 UTC)
+    - cron: "17 3 1 * *"
 
 jobs:
   test:
+    name: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -21,10 +29,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      # 19.5/20.2:依赖 pin 到具体版本,不裸装 latest
+      - name: Install pinned dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest casbin
+          python -m pip install -r requirements-ci.txt
 
       - name: Run tests
         run: python -m pytest tests/ -q
@@ -34,3 +43,45 @@ jobs:
           python doctor.py validate-model --model tests/real_data/basic_model.conf
           python doctor.py diagnose --model tests/real_data/basic_model.conf --policy tests/real_data/basic_policy.csv
           python doctor.py explain-deny --model tests/real_data/rbac_model.conf --policy tests/real_data/rbac_policy.csv --sub alice --obj data1 --act read
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # 只开致命类规则(E9 语法错误 / F pyflakes:未定义名、未用导入),
+      # 风格类规则等首次真实 lint 欠账清算后再扩
+      - name: Run ruff (fatal rules only)
+        run: |
+          python -m pip install ruff==0.16.6
+          ruff check --select E9,F --no-cache .
+
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # 20.2 密钥扫描:历史+当前 diff
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # 20.2 依赖漏洞审计(含月度 schedule 触发)
+      - name: pip-audit dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit==2.10.1
+          pip-audit -r requirements-ci.txt --strict --desc off

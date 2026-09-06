@@ -669,6 +669,8 @@ def generate(inputs, context=None):
         return {"matched": None,
                 "advice": "No template matched. Supported patterns: rbac, restful, abac. "
                           "Mention roles / REST endpoints / attribute ownership in the requirement."}
+    # 性能底线(执行标准 v1.2 §20.4):本排序的输入是内置模板表(_TEMPLATES,常数个),
+    # 不随用户数据增长;若未来模板改为外部/可扩展来源,需重估规模并加缓存或限制候选数。
     scored.sort(reverse=True)
     name = scored[0][1]
     t = _TEMPLATES[name]
