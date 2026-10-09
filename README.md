@@ -3,7 +3,7 @@
 Diagnose, generate, and fix [Casbin](https://github.com/casbin/casbin) `model.conf` / `policy.csv` configurations — and get a plain-language explanation of **why `enforce()` returns false**.
 
 [![tests](https://github.com/tlyyxjz/casbin-config-doctor/actions/workflows/tests.yml/badge.svg)](https://github.com/tlyyxjz/casbin-config-doctor/actions/workflows/tests.yml)
-[![tests](https://img.shields.io/badge/tests-40%20passed-brightgreen)]()
+[![tests](https://img.shields.io/badge/tests-62%20passed-brightgreen)]()
 [![python](https://img.shields.io/badge/python-3.9%2B-blue)]()
 [![deps](https://img.shields.io/badge/dependencies-stdlib%20only-orange)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -132,16 +132,18 @@ railcall market install tlyyxjz/casbin-config-doctor
 
 ## Tests
 
-40 tests, all green:
+62 tests, all green:
 
 ```console
 $ python -m pytest tests/ -q
-........................................                              [100%] 40 passed
+..............................................................           [100%]
+62 passed in 0.18s
 ```
 
 | File | Tests | Covers |
 |---|---:|---|
-| `test_handlers.py` | 17 | Unit tests: happy path, wrong token counts, cycles, duplicates, unknown templates, field-labelling regressions |
+| `test_handlers.py` | 30 | Unit tests: happy path, wrong token counts, cycles, duplicates, unknown templates, field-labelling regressions |
+| `test_lint.py` | 9 | Policy reference-integrity lint + explain-deny g-link hint (fixtures from downstream casbin issues: go-admin#730, gva#1403/#1533) |
 | `test_real_data_smoke.py` | 8 | Real example configs from `casbin/casbin/examples` (basic, rbac, domains, keymatch, abac) |
 | `test_real_world_scenarios.py` | 7 | Realistic configurations with planted defects |
 | `test_cross_validation_casbin.py` | 5 | Verdict agreement with the actual `casbin` library |

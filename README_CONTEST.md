@@ -54,7 +54,7 @@ Multi-tenant (`domains`) models are supported: role inheritance resolves per-dom
 
 ## Correctness
 
-`explain-deny` verdicts are cross-validated against the real `casbin` library — allow/deny agrees with `casbin.Enforcer.enforce()` on the official example configs. 40 automated tests green, including a 5,000-rule stress run (~26 ms).
+`explain-deny` verdicts are cross-validated against the real `casbin` library — allow/deny agrees with `casbin.Enforcer.enforce()` on the official example configs. 62 automated tests green, including a 5,000-rule stress run (~26 ms).
 
 ## Known limitations
 
